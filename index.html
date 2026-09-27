@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>N64 Heap Simulator</title>
+<style>
+:root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a64; --line: #deddd6; --accent: #2f6fdb;
+    --good: #1f8a4c; --bad: #c43d2f; --warn: #b7791f; --free: #ecebe5; --code: #8e6bd8; --actor: #2f9e8f;
+    --player: #d88a2f; --effect: #d8577a; --other: #7d8793; --pointer: #e0312b; --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg: #161614; --panel: #1f1f1c; --ink: #ecebe5; --muted: #a09f98; --line: #34332f; --accent: #6b9cf0;
+        --good: #4cc27f; --bad: #ef6b5d; --warn: #e0a84a; --free: #2a2a26;
+    }
+}
+:root[data-theme="dark"] {
+    --bg: #161614; --panel: #1f1f1c; --ink: #ecebe5; --muted: #a09f98; --line: #34332f; --accent: #6b9cf0;
+    --good: #4cc27f; --bad: #ef6b5d; --warn: #e0a84a; --free: #2a2a26;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 17px; margin: 0 12px 0 0; }
+header .spacer { flex: 1; }
+button, select, input { font: inherit; color: inherit; }
+button { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+select, input[type=text], input[type=number] { background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; min-width: 0; }
+.status { font-size: 13px; color: var(--muted); }
+.status.ok { color: var(--good); }
+.status.bad { color: var(--bad); }
+main { display: grid; grid-template-columns: minmax(250px, 300px) minmax(320px, 420px) 1fr; gap: 12px; padding: 12px 16px; align-items: start; }
+@media (max-width: 1100px) { main { grid-template-columns: 1fr 1fr; } #results { grid-column: 1 / -1; } }
+@media (max-width: 720px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+section.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+section.panel h2 { font-size: 14px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+main > section.panel { position: sticky; top: 12px; height: calc(100vh - 85px); overflow-y: auto; }
+main > section.panel > h2 { position: sticky; top: -12px; margin: -12px -12px 8px; padding: 12px 12px 8px; background: var(--panel); z-index: 1; }
+#routePanel { display: flex; flex-direction: column; overflow: hidden; }
+#routePanel > h2 { position: static; }
+.saves .combo { flex: 1; }
+.saves .combo-input { min-width: 0; }
+#steps { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+@media (max-width: 1100px) { #results { position: static; height: auto; overflow: visible; } }
+@media (max-width: 720px) { main > section.panel { position: static; height: auto; overflow: visible; } #steps { max-height: 70vh; } }
+h3 { font-size: 13px; margin: 14px 0 6px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+label.check { display: flex; gap: 6px; align-items: flex-start; margin: 3px 0; cursor: pointer; }
+label.check input { margin-top: 3px; }
+.hint { color: var(--muted); font-size: 12px; }
+details { border-top: 1px solid var(--line); padding: 6px 0; }
+details summary { cursor: pointer; font-weight: 600; font-size: 13px; }
+.step { border: 1px solid var(--line); border-radius: 7px; padding: 8px; margin: 6px 0; cursor: pointer; }
+.step.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.step.error { border-color: var(--bad); }
+.step.disabled { opacity: .5; border-style: dashed; }
+.step.disabled .title { text-decoration: line-through; }
+.step .tools button.off { border-color: var(--warn); color: var(--warn); }
+.step .head { display: flex; gap: 6px; align-items: center; }
+.step .num { font-family: var(--mono); color: var(--muted); width: 22px; }
+.step .title { font-weight: 600; flex: 1; }
+.step .tools button { padding: 1px 6px; font-size: 12px; }
+.step .fields { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin-top: 6px; align-items: center; }
+.step .fields label { font-size: 12px; color: var(--muted); }
+.step .summary { font-size: 12px; color: var(--muted); margin-top: 4px; font-family: var(--mono); overflow-wrap: anywhere; }
+.banner { border-radius: 7px; padding: 10px 12px; margin: 8px 0; border: 1px solid var(--line); }
+.banner.good { border-color: var(--good); }
+.banner.bad { border-color: var(--bad); }
+.banner.warn { border-color: var(--warn); }
+.banner strong { display: block; margin-bottom: 2px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; font-size: 13px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; font-family: var(--mono); overflow-wrap: anywhere; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+td.mono, .mono { font-family: var(--mono); }
+.tablewrap { max-height: 420px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+#heapmap { width: 100%; height: 64px; display: block; border-radius: 6px; border: 1px solid var(--line); cursor: crosshair; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); margin: 6px 0; }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; background: var(--c); }
+#tooltip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 12px var(--mono); display: none; z-index: 10; max-width: 420px; }
+.log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; color: var(--muted); }
+.empty { color: var(--muted); padding: 20px 0; text-align: center; }
+.combo { display: inline-block; position: relative; min-width: 0; }
+.combo-input { width: 100%; min-width: 180px; }
+.step .fields .combo, .step .fields .combo-input { width: 100%; min-width: 0; }
+.combo-list { position: fixed; z-index: 20; overflow-y: auto; max-width: min(520px, calc(100vw - 32px)); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 6px 18px rgba(0,0,0,.18); font-size: 13px; }
+.combo-row { padding: 4px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.combo-row.current { font-weight: 600; }
+.combo-row.active, .combo-row:hover { background: var(--accent); color: #fff; }
+.combo-empty { padding: 6px 8px; color: var(--muted); }
+.flag-search { width: 100%; margin: 6px 0 4px; }
+#flagSections details.section { border-top: 1px solid var(--line); padding: 0; }
+#flagSections details.section > summary { display: flex; align-items: center; gap: 6px; padding: 6px 0; font-weight: 600; font-size: 13px; }
+#flagSections details.section > summary { list-style: none; cursor: pointer; }
+#flagSections details.section > summary::-webkit-details-marker { display: none; }
+#flagSections details.section > summary::before { content: "▸"; width: 10px; color: var(--muted); }
+#flagSections details.section[open] > summary::before { content: "▾"; }
+#flagSections details.section.level2 { border-top: none; margin-left: 12px; }
+#flagSections details.section.level2 > summary { padding: 3px 0; font-weight: 500; }
+#flagSections details.section.level3 { border-top: none; margin-left: 12px; }
+#flagSections details.section.level3 > summary { padding: 2px 0; font-weight: 400; }
+#flagSections details.section > .flag { margin-left: 18px; }
+#flagSections .count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; text-align: center; }
+#flagSections .count:empty { display: none; }
+#flagSections .used { margin-left: 6px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; font-size: 10px; color: var(--muted); vertical-align: 1px; }
+#flagSections .flag.number { justify-content: space-between; align-items: center; gap: 10px; }
+#flagSections .flag.number > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+#flagSections .flag.number > .horse { display: flex; flex-direction: column; gap: 4px; flex: none; }
+#flagSections .flag.number > input { flex: none; width: 72px; text-align: right; font-family: var(--mono); }
+textarea { width: 100%; min-height: 90px; font: 12px var(--mono); background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+</style>
+</head>
+<body>
+<header>
+    <h1>N64 Heap Simulator</h1>
+    <span class="hint">OoT NTSC 1.2 actor heap, cutscene pointer and wrong warps</span>
+    <span class="spacer"></span>
+    <select id="example"><option value="">Load an example…</option></select>
+    <button id="reset" title="Clear the route and all flags (undo brings them back)">Reset</button>
+    <button id="romButton">Load your ROM</button>
+    <input id="romFile" type="file" accept=".z64,.n64,.v64" hidden>
+    <span id="romStatus" class="status">No ROM: reads of scene and object data stay unknown</span>
+    <button id="romForget" title="Remove the ROM stored in this browser" hidden>Forget ROM</button>
+    <button id="undo" title="Undo (Ctrl+Z)" disabled>Undo</button>
+    <button id="redo" title="Redo (Ctrl+Y)" disabled>Redo</button>
+    <button id="share">Copy share link</button>
+</header>
+<main>
+    <section class="panel" id="flagsPanel">
+        <h2>Game state</h2>
+        <div class="row">
+            <label class="check"><input type="radio" name="age" value="child" checked> Child</label>
+            <label class="check"><input type="radio" name="age" value="adult"> Adult</label>
+            <label class="check"><input type="radio" name="time" value="day" checked> Day</label>
+            <label class="check"><input type="radio" name="time" value="night"> Night</label>
+        </div>
+        <label class="check"><input type="checkbox" id="japanese"> Japanese game (pause screen text)</label>
+        <input type="text" id="flagSearch" class="flag-search" placeholder="Search flags, items and areas…" spellcheck="false" autocomplete="off">
+        <div id="flagSections"></div>
+        <details>
+            <summary>Other flags by name</summary>
+            <p class="hint">Comma-separated decomp names, for flags the list above does not cover.</p>
+            <label class="hint">Event flags (EVENTCHKINF_…)</label>
+            <input type="text" id="extraEvents" style="width:100%">
+            <label class="hint">Info table (INFTABLE_…)</label>
+            <input type="text" id="extraInfs" style="width:100%">
+        </details>
+    </section>
+    <section class="panel" id="routePanel">
+        <h2>Route</h2>
+        <div class="row saves">
+            <select id="saves"><option value="">Saved routes…</option></select>
+            <button id="saveAs" title="Save this route and its game state under a name">Save as</button>
+            <button id="deleteSave" title="Delete the chosen saved route">Delete</button>
+            <button id="exportFile" title="Download the chosen saved route (or the current one) as a .json file">Export</button>
+        </div>
+        <div id="steps"></div>
+        <div class="row">
+            <select id="addType"></select>
+            <button id="addStep" class="primary">Add step</button>
+        </div>
+        <details>
+            <summary>Import / export</summary>
+            <textarea id="routeJson" spellcheck="false"></textarea>
+            <div class="row"><button id="exportRoute">Export</button><button id="importRoute">Import</button><button id="importFile">Import file</button></div>
+            <input id="importFileInput" type="file" accept=".json,application/json" hidden>
+        </details>
+    </section>
+    <section class="panel" id="results">
+        <h2>After the selected step</h2>
+        <div id="resultBody"><div class="empty">Add a step to start.</div></div>
+    </section>
+</main>
+<div id="tooltip"></div>
+<script src="data.js"></script>
+<script src="engine.js"></script>
+<script src="rules.js"></script>
+<script src="route.js"></script>
+<script src="rom.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

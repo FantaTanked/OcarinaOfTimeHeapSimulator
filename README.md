@@ -2,7 +2,7 @@
 
 A browser page that simulates Ocarina of Time's NTSC 1.2 actor heap (the Zelda arena), the cutscene pointer and what a wrong warp does with it. Set the game state (age, story flags, what has been collected), list the route's steps, and every step shows the heap, where the cutscene pointer points and, at a warp, what the cutscene parser reads and where it sends Link.
 
-Use it at https://fantatanked.github.io/OcarinaOfTimeHeapSimulator/, or open `index.html` in a browser. Nothing needs installing or a server.
+Use it at https://fantatanked.github.io/OcarinaOfTimeHeapSimulator/.
 
 ## Your ROM
 

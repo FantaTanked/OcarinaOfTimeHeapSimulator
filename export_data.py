@@ -58,8 +58,25 @@ def export_actors(data: sim.TargetData) -> list:
             "category": info.category,
             "object": info.object_id,
             "flags": profile_flags(data, actor_id),
+            "cull": culling_volume(data, info.name),
         })
     return actors
+
+
+CULLING_DEFAULTS = {"cullingVolumeDistance": 1000.0, "cullingVolumeScale": 350.0, "cullingVolumeDownward": 700.0}
+
+
+def culling_volume(data: sim.TargetData, name: str) -> list:
+    """[distance, scale, downward] from the actor's init chain (Actor_Init defaults, z_actor.c:951-953)."""
+    values = dict(CULLING_DEFAULTS)
+    folder = data.decomp / "src/overlays/actors" / f"ovl_{name}"
+    sources = sorted(folder.glob("*.c")) if folder.is_dir() else []
+    text = "\n".join(source.read_text(errors="replace") for source in sources)
+    chain = re.search(r"InitChainEntry sInitChain\[\] = \{(.*?)\};", text, re.S)
+    if chain:
+        for field, value in re.findall(r"ICHAIN_F32\((cullingVolume\w+), (-?\d+(?:\.\d+)?)", chain.group(1)):
+            values[field] = float(value)
+    return [values["cullingVolumeDistance"], values["cullingVolumeScale"], values["cullingVolumeDownward"]]
 
 
 def export_effects(data: sim.TargetData) -> list:

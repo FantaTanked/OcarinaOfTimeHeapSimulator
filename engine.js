@@ -5,6 +5,7 @@
 
     const NODE = 0x30;
     const CAT_ENEMY = 5;
+    const ACTOR_FLAG_UPDATE_CULLING_DISABLED = 1 << 4;
     const NUM_CATEGORIES = 12;
     const ALLOC_ABSOLUTE = 1;
     const ALLOC_PERSISTENT = 2;
@@ -456,18 +457,19 @@
                 this.spawn(id, params, tag, { home: { pos: [x, y, z], rot: [rx, ry, rz] }, entry: index });
             }
             for (const actor of this.actors()) {
+                const updating = this.updatesThisFrame(actor);
                 if (actor === this.player && this.playerFirstUpdate) {
                     const run = this.playerFirstUpdate;
                     this.playerFirstUpdate = null;
                     run(this);
                 }
-                if (this.csCues && this.rules.cue && !actor.killed && !actor.initPending) this.rules.cue(this, actor);
-                if (actor.afterUpdates && !actor.killed && !actor.initPending && --actor.updatesLeft <= 0) {
+                if (this.csCues && this.rules.cue && updating && !actor.killed && !actor.initPending) this.rules.cue(this, actor);
+                if (actor.afterUpdates && updating && !actor.killed && !actor.initPending && --actor.updatesLeft <= 0) {
                     const run = actor.afterUpdates;
                     actor.afterUpdates = null;
                     run();
                 }
-                if (actor.firstUpdate && !actor.killed && this.objectsLoaded(actor.waitObjects)) {
+                if (actor.firstUpdate && updating && !actor.killed && this.objectsLoaded(actor.waitObjects)) {
                     const run = actor.firstUpdate;
                     actor.firstUpdate = null;
                     run();
@@ -480,6 +482,8 @@
                     this.delete(actor, actor.killReason);
                 }
             }
+            // Actor_Draw: each actor's culling test decides whether it updates next frame
+            for (const actor of this.actors()) actor.insideCulling = this.insideCullingVolume(actor);
         }
         // Room_FinishRoomChange -> func_80031B14
         // Off-screen actors are deleted at once; on-screen ones are killed and freed by a later Actor_UpdateAll, or
@@ -602,15 +606,15 @@
         // when he leaves; re-checked whenever Link moves, in the game's update order
         proximity(actor, spawnDistance, removeDistance, make) {
             actor.proximityRule = { spawnDistance, removeDistance, make, children: [] };
-            // FLAGS 0: the first Update only runs after a draw pass has seen it, so the second Update is frame 3
-            this.afterUpdates(actor, 3, () => this.checkProximity(actor));
+            // FLAGS 0: the first Update (setup) waits for a draw pass to see it, and the second one spawns
+            this.afterUpdates(actor, 2, () => this.checkProximity(actor));
         }
         // Math3D_Dist1DSq(projectedPos.x, projectedPos.z): the actor through the game's 60 degree, 4:3 perspective
         // (z_view.c), with the camera behind Link along his facing; falls back to Link's distance without a facing
-        projectedDistance(actor) {
-            const pos = actor.home ? actor.home.pos : null;
-            if (!pos || !this.linkPos) return Infinity;
-            if (this.linkAngle === undefined || this.linkAngle === null) return Math.hypot(pos[0] - this.linkPos[0], pos[1] - this.linkPos[1], pos[2] - this.linkPos[2]);
+        // SkinMatrix_Vec3fMtxFMultXYZW(viewProjectionMtxF, pos): the game's 60 degree, 4:3 perspective (z_view.c) with the
+        // camera behind Link along his facing; null when Link has no facing yet
+        projectClip(pos) {
+            if (!pos || !this.linkPos || this.linkAngle === undefined || this.linkAngle === null) return null;
             const yaw = (this.linkAngle / 0x8000) * Math.PI;
             const fx = Math.sin(yaw), fz = Math.cos(yaw);
             const back = this.cameraDistance || 250;
@@ -619,13 +623,35 @@
             let f = [at[0] - eye[0], at[1] - eye[1], at[2] - eye[2]];
             const fl = Math.hypot(...f); f = f.map((v) => v / fl);
             let r = [f[2], 0, -f[0]]; const rl = Math.hypot(...r) || 1; r = r.map((v) => v / rl);
+            const u = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]];
             const d = [pos[0] - eye[0], pos[1] - eye[1], pos[2] - eye[2]];
-            const xView = d[0] * r[0] + d[1] * r[1] + d[2] * r[2];
-            const depth = d[0] * f[0] + d[1] * f[1] + d[2] * f[2];
+            const dot = (v) => d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
+            const depth = dot(f);
             const near = 10, far = 12800, cot = 1 / Math.tan(Math.PI / 6);
-            const xClip = xView * cot / (4 / 3);
-            const zClip = depth * (near + far) / (far - near) - (2 * near * far) / (far - near);
-            return Math.hypot(xClip, zClip);
+            return { x: dot(r) * cot / (4 / 3), y: dot(u) * cot, z: depth * (near + far) / (far - near) - (2 * near * far) / (far - near), w: depth };
+        }
+        // Math3D_Dist1DSq(projectedPos.x, projectedPos.z); without a facing, Link's distance
+        projectedDistance(actor) {
+            const pos = actor.home ? actor.home.pos : null;
+            if (!pos || !this.linkPos) return Infinity;
+            const clip = this.projectClip(pos);
+            if (!clip) return Math.hypot(pos[0] - this.linkPos[0], pos[1] - this.linkPos[1], pos[2] - this.linkPos[2]);
+            return Math.hypot(clip.x, clip.z);
+        }
+        // Actor_CullingVolumeTest (z_actor.c:2855) against the actor's culling volume from its init chain
+        insideCullingVolume(actor) {
+            const clip = this.projectClip(actor.home ? actor.home.pos : null);
+            if (!clip) return true;
+            const [distance, scale, downward] = actor.info.cull || [1000, 350, 700];
+            if (!(clip.z > -scale && clip.z < distance + scale)) return false;
+            const invW = clip.w < 1 ? 1 : 1 / clip.w;
+            return (Math.abs(clip.x) - scale) * invW < 1 && (clip.y + downward) * invW > -1 && (clip.y - scale) * invW < 1;
+        }
+        // Actor_UpdateAll only runs Update with ACTOR_FLAG_UPDATE_CULLING_DISABLED or ACTOR_FLAG_INSIDE_CULLING_VOLUME, which
+        // the previous frame's draw pass set; a new actor has not been drawn yet
+        updatesThisFrame(actor) {
+            if (this.flags.noUpdateCulling) return true;
+            return (actor.flags & ACTOR_FLAG_UPDATE_CULLING_DISABLED) !== 0 || actor.insideCulling === true;
         }
         checkProximity(actor) {
             const rule = actor.proximityRule;
@@ -642,7 +668,7 @@
             function make(r) { return r.make(); }
         }
         updateProximity() {
-            for (const actor of this.actors()) if (actor.proximityRule && !actor.initPending && !actor.afterUpdates) this.checkProximity(actor);
+            for (const actor of this.actors()) if (actor.proximityRule && !actor.initPending && !actor.afterUpdates && this.updatesThisFrame(actor)) this.checkProximity(actor);
             this.updateAll();
         }
         // Work an actor does on its nth Update after Init

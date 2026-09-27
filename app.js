@@ -179,6 +179,7 @@
         document.querySelector(`input[name=age][value=${f.adult ? "adult" : "child"}]`).checked = true;
         document.querySelector(`input[name=time][value=${f.night ? "night" : "day"}]`).checked = true;
         $("japanese").checked = !!f.japanese;
+        $("noUpdateCulling").checked = !!f.noUpdateCulling;
         $("extraEvents").value = (f.events || []).filter((x) => !listed.has(x)).join(", ");
         $("extraInfs").value = (f.infs || []).filter((x) => !listed.has(x)).join(", ");
         const scroll = $("flagsPanel").scrollTop;
@@ -581,6 +582,7 @@
     document.querySelectorAll("input[name=age]").forEach((r) => r.addEventListener("change", () => { state.flags.adult = r.value === "adult" && r.checked; changed(); }));
     document.querySelectorAll("input[name=time]").forEach((r) => r.addEventListener("change", () => { state.flags.night = r.value === "night" && r.checked; changed(); }));
     $("japanese").addEventListener("change", (e) => { state.flags.japanese = e.target.checked; changed(); });
+    $("noUpdateCulling").addEventListener("change", (e) => { state.flags.noUpdateCulling = e.target.checked; changed(false); });
     $("extraEvents").addEventListener("change", () => changed());
     $("extraInfs").addEventListener("change", () => changed());
     $("addStep").addEventListener("click", () => {

@@ -57,6 +57,7 @@
         }
         return {
             adult: !!input.adult, night: !!input.night, japanese: !!input.japanese, shipObjectTiming: !!input.shipObjectTiming,
+            noUpdateCulling: !!input.noUpdateCulling,
             events: set(input.events), infs: set(input.infs), itemGetInfs: set(input.itemGetInfs),
             items: set(input.items), quests: set(input.quests), equips: set(input.equips), scenes,
             gsTokens: Number(input.gsTokens) || 0, fishingGamesPlayed: Number(input.fishingGamesPlayed) || 0,
@@ -304,10 +305,12 @@
                 const actor = findLive(w, p.which);
                 const rule = actor.proximityRule;
                 if (!rule) throw new Sim.SimError(`${actor.info.name} [${actor.tag}] is not a spawner`);
-                if ((actor.initPending || actor.afterUpdates) && /now$/.test(p.mode)) throw new Sim.SimError(`${actor.tag} hasn't had its first updates yet (spawners start on frame 3)`);
+                if (actor.initPending) throw new Sim.SimError(`${actor.tag} is still waiting for its object`);
+                // Forcing overrides the camera, including a spawner that has not updated yet because it was culled
+                if (actor.afterUpdates && p.mode !== "back to the camera") actor.afterUpdates = null;
                 const forced = { "load now": "on", "unload now": "off", "keep loaded": "on", "keep unloaded": "off", "back to the camera": undefined }[p.mode];
                 rule.forced = forced;
-                if (forced && !actor.initPending && !actor.afterUpdates) w.checkProximity(actor);
+                if (forced) w.checkProximity(actor);
                 // "now" is a one-off: later moves go back to the camera
                 if (p.mode === "load now" || p.mode === "unload now") rule.forced = undefined;
                 w.updateAll();

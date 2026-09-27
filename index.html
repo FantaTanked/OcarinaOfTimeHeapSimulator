@@ -142,6 +142,7 @@ textarea { width: 100%; min-height: 90px; font: 12px var(--mono); background: va
             <label class="check"><input type="radio" name="time" value="night"> Night</label>
         </div>
         <label class="check"><input type="checkbox" id="japanese"> Japanese game (pause screen text)</label>
+        <label class="check" title="The game only updates actors without the update-off-screen flag while they are inside their culling volume"><input type="checkbox" id="noUpdateCulling"> Update every actor, even off screen (ignore culling)</label>
         <input type="text" id="flagSearch" class="flag-search" placeholder="Search flags, items and areas…" spellcheck="false" autocomplete="off">
         <div id="flagSections"></div>
         <details>

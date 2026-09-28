@@ -480,6 +480,11 @@
             body.append(el("div", { class: `banner ${o.cls}` }, el("strong", {}, o.title), o.body,
                 result.report.stale === false ? el("div", { class: "hint" }, "The destination layer has its own cutscene, so this is not a wrong warp.") : null));
         }
+        if (result.step.type === "wrongWarp") {
+            body.append(finderSection(selected));
+            if (planRequest && planRequest.key === finderKey(selected)) body.append(plannerSection(selected));
+        }
+        else if (result.entrance && !result.error) body.append(exploreSection(selected));
         if (result.heap) {
             body.append(el("dl", { class: "kv" },
                 el("dt", {}, "Area"), el("dd", {}, `${result.scene}${result.report && result.report.entrance ? ` via ${result.report.entrance} (layer ${result.report.layer})` : ""}, room ${result.room}`),
@@ -505,6 +510,537 @@
                 el("td", { class: "mono" }, addr(b.start + 0x30)), el("td", { class: "mono" }, hex(b.size)), el("td", {}, b.free ? "free" : b.tag)));
             body.append(el("div", { class: "tablewrap" }, el("table", {}, el("tr", {}, el("th", {}, "Address"), el("th", {}, "Size"), el("th", {}, "Contents")), rows)));
         }
+    }
+
+    // ---- wrong warp finder: what can be left at the stale pointer, and where each choice sends Link ----
+    const finderRuns = new Map();
+    let finderTarget = "";
+    const OUTCOME_NAMES = { hang: "The game locks up in the parser", empty: "Nothing happens (no commands)", runs: "Runs commands but does not warp", ends: "The cutscene ends at once" };
+    const finderKey = (index) => JSON.stringify([state.flags, state.steps.slice(0, index + 1)]);
+    const angleText = (list) => {
+        const parts = list.map(([a, b]) => (a === b ? hex(a, 4) : `${hex(a, 4)}-${hex(b, 4)}`));
+        return parts.length > 8 ? `${parts.slice(0, 8).join(", ")} ... (${parts.length - 8} more)` : parts.join(", ");
+    };
+    const placeName = (name) => prettyName(name.replace(/^(ENTR|SCENE)_/, ""));
+    // CutsceneCmd_Destination has no case for an unlisted destination: the cutscene turns unskippable and nothing warps
+    const warpsTo = (destination) => !!destination && data.csDestinations[destination.id] !== undefined;
+    const outcomeName = (g) => (warpsTo(g.destination) ? placeName(g.destination.name)
+        : g.destination ? `Unlisted destination ${hex(g.destination.id)}: the cutscene can't be skipped and nothing warps` : OUTCOME_NAMES[g.outcome] || g.outcome);
+    // Actors with the same setup as one phrase, the four arrows as one
+    function candidateText(labels) {
+        if (labels.length === N64Finder.CANDIDATES.length) return "Any actor from the list";
+        const arrows = ["Arrow", "Fire arrow", "Ice arrow", "Light arrow"];
+        const list = arrows.every((a) => labels.includes(a)) ? labels.filter((l) => !arrows.slice(1).includes(l)).map((l) => (l === "Arrow" ? "Arrow (any kind)" : l)) : labels;
+        return list.length > 1 ? `${list.slice(0, -1).join(", ")} or ${list[list.length - 1]}` : list[0];
+    }
+    // Setups that differ only in which actor is left, merged
+    function mergeSetups(setups) {
+        const merged = new Map();
+        for (const r of setups) {
+            const key = `${r.offset}|${JSON.stringify(r.angles)}|${r.dependsOnPosition}`;
+            if (!merged.has(key)) merged.set(key, { ...r, labels: [] });
+            merged.get(key).labels.push(r.candidate);
+        }
+        return [...merged.values()];
+    }
+    function setupList(setups, limit = 30, onPlan = null) {
+        const lines = mergeSetups(setups);
+        return el("ul", { class: "setups" },
+            lines.slice(0, limit).map((m) => {
+                const count = m.angles ? m.angles.reduce((n, [a, b]) => n + b - a + 1, 0) : 0;
+                const all = m.angles ? m.angles.map(([a, b]) => (a === b ? hex(a, 4) : `${hex(a, 4)}-${hex(b, 4)}`)).join(", ") : "";
+                return el("li", {},
+                    el("strong", {}, candidateText(m.labels)), m.offset ? `, with the pointer ${hex(m.offset)} bytes into it` : ", with the pointer at its start",
+                    el("div", { class: "hint" },
+                        m.angles ? ["Link facing ", el("span", { class: "mono", title: all }, angleText(m.angles)), ` (${count.toLocaleString()} angle${count === 1 ? "" : "s"})`] : "Link facing any angle",
+                        m.dependsOnPosition ? " · also reads Link's position" : "",
+                        onPlan && N64Planner.PLACE[m.labels[0]] ? [" · ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); onPlan(m); } }, "Plan how to get it there")] : null));
+            }),
+            lines.length > limit ? el("li", { class: "hint" }, `... ${lines.length - limit} more`) : null);
+    }
+    function destinationCard(title, count, open, badge, ...content) {
+        return el("details", { class: "dest", open: open ? true : null },
+            el("summary", {}, el("span", {}, title), badge ? el("span", { class: "badge" }, badge) : null, el("span", { class: "count" }, count)),
+            el("div", { class: "dest-body" }, content));
+    }
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    // Searches split by candidate across worker threads; a page opened as a file runs them itself in slices
+    let finderPool = null;
+    function workerPool() {
+        if (finderPool && finderPool.rom === rom) return finderPool;
+        stopWorkers();
+        const workers = [];
+        for (let i = 0; i < Math.max(1, Math.min((navigator.hardwareConcurrency || 2) - 1, 6)); i++) {
+            const worker = new Worker("finder-worker.js");
+            worker.postMessage({ rom: rom.bytes });
+            workers.push(worker);
+        }
+        finderPool = { rom, workers };
+        return finderPool;
+    }
+    function stopWorkers() {
+        if (finderPool) finderPool.workers.forEach((worker) => worker.terminate());
+        finderPool = null;
+    }
+    // Runs N64Finder.runJob for each job on the workers; onProgress gets the parts finished and the parses so far
+    function runJobs(jobs, onProgress) {
+        if (!jobs.length) return Promise.resolve([]);
+        const pool = workerPool();
+        return new Promise((resolve, reject) => {
+            const results = new Array(jobs.length);
+            const parses = jobs.map(() => 0);
+            let next = 0;
+            let finished = 0;
+            const report = () => onProgress(finished, parses.reduce((sum, n) => sum + n, 0));
+            const give = (worker) => {
+                if (next >= jobs.length) return;
+                const id = next++;
+                worker.onmessage = (event) => {
+                    const message = event.data;
+                    if (message.error) return reject(new Error(message.error));
+                    if (message.progress) {
+                        parses[id] = message.progress.parses;
+                        return report();
+                    }
+                    results[id] = message.result;
+                    parses[id] = message.result.parses;
+                    finished++;
+                    report();
+                    if (finished === jobs.length) resolve(results);
+                    else give(worker);
+                };
+                worker.onerror = (event) => {
+                    event.preventDefault();
+                    reject(Object.assign(new Error("workers are not available"), { unavailable: true }));
+                };
+                worker.postMessage({ id, job: jobs[id] });
+            };
+            pool.workers.forEach(give);
+        });
+    }
+    // Every candidate as its own job, so the heavy ones spread across the workers
+    const jobsFor = (flags, steps, warpIndex) => N64Finder.CANDIDATES.map((_, part) => ({ flags, steps, warpIndex, part, parts: N64Finder.CANDIDATES.length }));
+    // Steps a generator in 40 ms slices between page updates, for when workers are not available
+    function runSliced(run, generator, onProgress, onDone) {
+        const tick = () => {
+            if (run.status !== "running") return;
+            const until = performance.now() + 40;
+            let next = null;
+            try {
+                while (performance.now() < until) {
+                    next = generator.next();
+                    if (next.done) break;
+                    onProgress(next.value);
+                }
+            } catch (e) {
+                return failRun(run, e);
+            }
+            if (next && next.done) return onDone(next.value);
+            setTimeout(tick, 0);
+        };
+        tick();
+    }
+    function failRun(run, e) {
+        run.status = "error";
+        run.error = e.message;
+        renderResult();
+    }
+    function setRunText(run, id, text) {
+        run.text = text;
+        const status = $(id);
+        if (status) status.textContent = text;
+    }
+    function startFinder(index) {
+        const key = finderKey(index);
+        const run = { status: "running", text: null, started: performance.now() };
+        finderRuns.set(key, run);
+        renderResult();
+        setTimeout(() => {
+            const flags = JSON.parse(JSON.stringify(state.flags));
+            const steps = JSON.parse(JSON.stringify(state.steps.slice(0, index + 1)));
+            let context;
+            try {
+                context = N64Finder.prepare(data, rules, flags, steps, index, rom);
+            } catch (e) {
+                return failRun(run, e);
+            }
+            const done = () => {
+                context.view = null;
+                run.status = "done";
+                run.found = context;
+                run.seconds = (performance.now() - run.started) / 1000;
+                if (finderKey(selected) === key) renderResult();
+            };
+            const sliced = () => runSliced(run, N64Finder.search(context),
+                (p) => setRunText(run, "finderStatus", `Searching: ${p.done} of ${p.total} placements, ${p.parses.toLocaleString()} parses so far`), done);
+            const jobs = jobsFor(flags, steps, index);
+            let started;
+            try {
+                started = runJobs(jobs, (finished, parses) => {
+                    if (run.status === "running") setRunText(run, "finderStatus", `Searching on ${finderPool.workers.length} threads: ${finished} of ${jobs.length} actors done, ${parses.toLocaleString()} parses so far`);
+                });
+            } catch (e) {
+                return sliced();
+            }
+            started.then((parts) => {
+                if (run.status !== "running") return;
+                N64Finder.merge(context, parts);
+                done();
+            }, (e) => {
+                if (run.status !== "running") return;
+                if (!e.unavailable) return failRun(run, e);
+                stopWorkers();
+                sliced();
+            });
+        }, 30);
+    }
+    function finderSection(index) {
+        const run = finderRuns.get(finderKey(index));
+        const names = Object.entries(data.csDestinations).sort((a, b) => a[1].localeCompare(b[1]));
+        const target = el("select", {}, el("option", { value: "" }, "Any destination"), ...names.map(([id, name]) => el("option", { value: id }, name)));
+        target.value = finderTarget;
+        target.addEventListener("change", () => { finderTarget = target.value; renderResult(); });
+        const running = run && run.status === "running";
+        const button = el("button", { class: "primary", disabled: !rom || running ? true : null, onclick: () => startFinder(index) }, run && run.status === "done" ? "Search again" : "Search");
+        const cancel = running ? el("button", { onclick: () => { run.status = "cancelled"; stopWorkers(); renderResult(); } }, "Cancel") : null;
+        const box = el("div", { class: "finder" },
+            el("h3", {}, "What reaches a destination?"),
+            el("p", { class: "hint" }, "Tries every actor Link can leave in the heap (bombchu, bomb, hookshot, arrows, seed, nut, boomerang, bottle bug, fish, blue fire) with the stale pointer landing at every 16-byte offset inside it, at every angle Link can face, and parses what the warp would read. Link's position is taken from the step before the warp."),
+            el("div", { class: "row" }, searchable(target), button, cancel));
+        if (!rom) box.append(el("div", { class: "hint" }, "Load your ROM to search: the parser reads scene and object data from it."));
+        if (running) box.append(el("div", { id: "finderStatus", class: "hint" }, run.text || "Running the route to the warp"));
+        if (run && run.status === "error") box.append(el("div", { class: "banner bad" }, run.error));
+        if (run && run.status === "cancelled") box.append(el("div", { class: "hint" }, "Search cancelled."));
+        if (run && run.status === "done") {
+            const found = run.found;
+            const groups = N64Finder.byDestination(found);
+            const reach = groups.filter((g) => warpsTo(g.destination));
+            const others = groups.filter((g) => !warpsTo(g.destination));
+            const shown = finderTarget ? reach.filter((g) => String(g.destination.id) === finderTarget) : reach;
+            const b = found.baseline;
+            box.append(el("p", { class: "finder-summary" }, "As the route stands this warp leads to ", el("strong", {}, outcomeName(b)), ". ",
+                reach.length ? `Leaving an actor at ${addr(found.pointer)} can lead to ${plural(reach.length, "destination")}.` : `Nothing left at ${addr(found.pointer)} leads to a destination.`));
+            box.append(el("div", { class: "hint" }, `${found.scene} layer ${found.layer} · ${found.parses.toLocaleString()} parses in ${run.seconds.toFixed(1)} s`));
+            if (finderTarget && !shown.length) box.append(el("div", { class: "banner warn" }, "Nothing Link can leave here reaches that destination from this pointer."));
+            const list = el("div", { class: "finder-results" });
+            box.append(list);
+            shown.forEach((g) => list.append(destinationCard(outcomeName(g), plural(mergeSetups(g.setups).length, "setup"), false,
+                warpsTo(b.destination) && b.destination.id === g.destination.id ? "the route as it stands" : null,
+                setupList(g.setups, 30, (m) => openPlanner(index, m, g.destination)))));
+            if (others.length) {
+                list.append(destinationCard("Other outcomes (no warp)", plural(others.reduce((n, g) => n + mergeSetups(g.setups).length, 0), "setup"), false, null,
+                    others.map((g) => el("div", { class: "warp" }, el("div", { class: "warp-title" }, outcomeName(g)), setupList(g.setups, 10)))));
+            }
+        }
+        return box;
+    }
+
+    // ---- placement planner: moves that leave a finder setup's actor at the pointer, checked by parsing the whole route ----
+    let planRequest = null;
+    const stepText = (step) => {
+        const def = stepTypes[step.type];
+        const params = Object.entries(step.params || {}).filter(([k, v]) => v !== "" && k !== "tag").map(([k, v]) => `${k} ${v}`).join(", ");
+        return `${def ? def.label : step.type}${params ? ` (${params})` : ""}`;
+    };
+    function openPlanner(index, setup, destination) {
+        const angle = setup.angles ? hex(setup.angles[0][0], 4) : "0000";
+        planRequest = { key: finderKey(index), labels: setup.labels.filter((l) => N64Planner.PLACE[l]), target: setup.start, offset: setup.offset, angle,
+            angles: setup.angles, destination, maxMoves: 6, kinds: Object.fromEntries(Object.keys(N64Planner.MOVES).map((k) => [k, true])), run: null };
+        planRequest.candidate = planRequest.labels[0];
+        renderResult();
+        const box = $("plannerBox");
+        if (box) box.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    function startPlan(index) {
+        const req = planRequest;
+        const run = { status: "running", text: null, started: performance.now() };
+        req.run = run;
+        renderResult();
+        setTimeout(() => {
+            let plan;
+            try {
+                plan = N64Planner.plan(data, rules, JSON.parse(JSON.stringify(state.flags)), JSON.parse(JSON.stringify(state.steps.slice(0, index + 1))), {
+                    start: req.start, warp: index, candidate: req.candidate, target: req.target, angle: req.angle, link: { pos: req.pos },
+                    destination: req.destination.id, kinds: req.kinds, maxMoves: req.maxMoves, rom });
+            } catch (e) {
+                return failRun(run, e);
+            }
+            runSliced(run, plan, (p) => setRunText(run, "plannerStatus", `Move ${p.depth} of ${p.maxMoves}: ${p.heaps.toLocaleString()} different heaps tried, ${p.found} plan${p.found === 1 ? "" : "s"} found`), (result) => {
+                run.status = "done";
+                run.result = result;
+                run.seconds = (performance.now() - run.started) / 1000;
+                if (planRequest === req) renderResult();
+            });
+        }, 30);
+    }
+    function usePlan(index, found) {
+        const req = planRequest;
+        const travel = state.steps.findIndex((s, i) => i > req.start && N64Planner.TRAVEL.includes(s.type));
+        const replaced = travel - req.start - 1;
+        if (replaced > 0 && !confirm(`Replace steps ${req.start + 2} to ${travel} with this plan's ${found.moves.length + found.placement.length} steps?`)) return;
+        const added = [...found.moves, ...found.placement].map((s) => JSON.parse(JSON.stringify(s)));
+        state.steps.splice(req.start + 1, replaced, ...added);
+        selected = index - replaced + added.length;
+        planRequest = null;
+        changed();
+    }
+    function plannerSection(index) {
+        const req = planRequest;
+        const results = lastRun ? lastRun.results : [];
+        const starts = N64Planner.startSteps(results, index);
+        if (req.start === undefined || !starts.steps.includes(req.start)) req.start = starts.suggested;
+        if (!req.pos) req.pos = results[req.start] && results[req.start].link ? results[req.start].link.pos.slice() : [0, 0, 0];
+        const running = req.run && req.run.status === "running";
+        const actor = el("select", {}, req.labels.map((l) => el("option", { value: l }, l)));
+        actor.value = req.candidate;
+        actor.addEventListener("change", () => { req.candidate = actor.value; });
+        const startSelect = el("select", {}, starts.steps.map((i) => el("option", { value: String(i) }, `Step ${i + 1}: ${stepText(state.steps[i])}`)));
+        startSelect.value = String(req.start);
+        startSelect.addEventListener("change", () => {
+            req.start = Number(startSelect.value);
+            req.pos = results[req.start] && results[req.start].link ? results[req.start].link.pos.slice() : req.pos;
+            renderResult();
+        });
+        const angle = el("input", { type: "text", class: "mono", value: req.angle, size: 6 });
+        angle.addEventListener("change", () => { req.angle = angle.value.trim().toUpperCase(); });
+        const coords = [0, 1, 2].map((i) => {
+            const input = el("input", { type: "number", value: String(req.pos[i]), style: "width: 80px" });
+            input.addEventListener("change", () => { req.pos[i] = Number(input.value) || 0; });
+            return input;
+        });
+        const moves = el("input", { type: "number", min: 1, max: 8, value: String(req.maxMoves), style: "width: 60px" });
+        moves.addEventListener("change", () => { req.maxMoves = Math.max(1, Math.min(8, Number(moves.value) || 6)); });
+        const kinds = Object.entries(N64Planner.MOVES).map(([key, label]) => {
+            const box = el("input", { type: "checkbox" });
+            box.checked = !!req.kinds[key];
+            box.addEventListener("change", () => { req.kinds[key] = box.checked; });
+            return el("label", { class: "check" }, box, el("span", {}, label));
+        });
+        const box = el("div", { class: "finder", id: "plannerBox" },
+            el("h3", {}, `Plan: get it to ${addr(req.target)} for ${placeName(req.destination.name)}`),
+            el("p", { class: "hint" }, `Tries moves after the chosen step, up to the set number, looking for a heap where Link can leave the actor at ${addr(req.target)} (pointer +${hex(req.offset)}). Each hit is checked by running the whole route with the plan and parsing the pointer at the warp. It only knows the moves ticked below, in the area of the chosen step.`),
+            el("div", { class: "planner-grid" },
+                el("label", {}, "Actor"), actor,
+                el("label", {}, "Link's angle"), el("span", {}, angle, req.angles ? el("span", { class: "hint" }, ` any of ${angleText(req.angles)}`) : null),
+                el("label", {}, "Work from"), startSelect,
+                el("label", {}, "Link stands at"), el("span", {}, coords, el("span", { class: "hint" }, " (x, y, z where he leaves it)")),
+                el("label", {}, "Most moves"), moves),
+            el("div", { class: "planner-kinds" }, kinds),
+            el("div", { class: "row" },
+                el("button", { class: "primary", disabled: !rom || running ? true : null, onclick: () => startPlan(index) }, req.run && req.run.status === "done" ? "Search again" : "Search"),
+                running ? el("button", { onclick: () => { req.run.status = "cancelled"; renderResult(); } }, "Cancel") : null,
+                el("button", { onclick: () => { planRequest = null; renderResult(); } }, "Close")));
+        if (running) box.append(el("div", { id: "plannerStatus", class: "hint" }, req.run.text || "Starting"));
+        if (req.run && req.run.status === "error") box.append(el("div", { class: "banner bad" }, req.run.error));
+        if (req.run && req.run.status === "cancelled") box.append(el("div", { class: "hint" }, "Search cancelled."));
+        if (req.run && req.run.status === "done") {
+            const { plans, heaps } = req.run.result;
+            box.append(el("div", { class: "hint" }, `${heaps.toLocaleString()} different heaps tried in ${req.run.seconds.toFixed(1)} s.`));
+            if (!plans.length) box.append(el("div", { class: "banner warn" }, "No plan found. Allow more moves or more kinds of move, try another step to work from, or another actor or angle."));
+            const list = el("div", { class: "finder-results" });
+            plans.forEach((found, n) => list.append(destinationCard(`Plan ${n + 1}`, `${found.moves.length} move${found.moves.length === 1 ? "" : "s"}`, false, "reaches it",
+                el("ol", { class: "setups" }, found.moves.map((step) => el("li", {}, stepText(step))), found.placement.map((step) => el("li", {}, el("strong", {}, stepText(step))))),
+                el("div", { class: "row" }, el("button", { onclick: () => usePlan(index, found) }, "Use this plan")))));
+            box.append(list);
+        }
+        return box;
+    }
+
+    // ---- explorer: every wrong warp from a step, and what to leave at the pointer for each destination ----
+    const exploreRuns = new Map();
+    const exploreKey = (index) => `explore ${finderKey(index)}`;
+    // A generator stepped in 40 ms slices between page updates; resolves with its return value unless live() turns false
+    function sliceGenerator(generator, onProgress, live) {
+        return new Promise((resolve, reject) => {
+            const tick = () => {
+                if (!live()) return;
+                const until = performance.now() + 40;
+                try {
+                    for (;;) {
+                        const next = generator.next();
+                        if (next.done) return resolve(next.value);
+                        onProgress(next.value);
+                        if (performance.now() >= until) break;
+                    }
+                } catch (e) {
+                    return reject(e);
+                }
+                setTimeout(tick, 0);
+            };
+            tick();
+        });
+    }
+    // Explores step `index` on the workers (or in the page where they can't start); onText gets progress lines
+    async function exploreStep(flags, steps, index, onText, live) {
+        const plan = N64Finder.explorePlan(data, rules, flags, steps.slice(0, index + 1), index, rom);
+        const jobs = plan.searches.flatMap((s) => jobsFor(flags, s.steps, s.warpIndex));
+        try {
+            const parts = await runJobs(jobs, (finished, parses) => {
+                if (live()) onText(`${plan.searches.length} search${plan.searches.length === 1 ? "" : "es"} on ${finderPool.workers.length} threads: ${finished} of ${jobs.length} parts done, ${parses.toLocaleString()} parses so far`);
+            });
+            const each = N64Finder.CANDIDATES.length;
+            plan.searches.forEach((s, n) => N64Finder.merge(s.context, parts.slice(n * each, (n + 1) * each)));
+            return N64Finder.finishPlan(plan);
+        } catch (e) {
+            if (!e.unavailable) throw e;
+            stopWorkers();
+            return sliceGenerator(N64Finder.explore(data, rules, flags, steps.slice(0, index + 1), index, rom),
+                (p) => onText(`Search ${p.warp} of ${p.warps}: ${p.done} of ${p.total} placements`), live);
+        }
+    }
+    function startExplore(index) {
+        const key = exploreKey(index);
+        const run = { status: "running", text: null, started: performance.now() };
+        exploreRuns.set(key, run);
+        renderResult();
+        const live = () => run.status === "running";
+        setTimeout(async () => {
+            try {
+                const explored = await exploreStep(JSON.parse(JSON.stringify(state.flags)), JSON.parse(JSON.stringify(state.steps)), index,
+                    (text) => setRunText(run, "exploreStatus", text), live);
+                if (!live()) return;
+                run.status = "done";
+                run.explored = explored;
+                run.seconds = (performance.now() - run.started) / 1000;
+                if (exploreKey(selected) === key) renderResult();
+            } catch (e) {
+                if (live()) failRun(run, e);
+            }
+        }, 30);
+    }
+    // Every step of the route explored in turn, for the accordion
+    let exploreAll = null;
+    const exploreAllKey = () => JSON.stringify([state.flags, state.steps]);
+    function startExploreAll() {
+        const results = lastRun ? lastRun.results : [];
+        const indexes = results.map((r, i) => i).filter((i) => results[i].entrance && !results[i].error);
+        const run = { key: exploreAllKey(), status: "running", text: null, started: performance.now(), steps: [], open: new Set(), scroll: 0 };
+        exploreAll = run;
+        renderResult();
+        const live = () => exploreAll === run && run.status === "running";
+        const flags = JSON.parse(JSON.stringify(state.flags));
+        const steps = JSON.parse(JSON.stringify(state.steps));
+        setTimeout(async () => {
+            for (let n = 0; n < indexes.length; n++) {
+                const index = indexes[n];
+                const started = performance.now();
+                const entry = { index };
+                try {
+                    entry.explored = await exploreStep(flags, steps, index, (text) => setRunText(run, "exploreAllStatus", `Step ${index + 1} (${n + 1} of ${indexes.length}): ${text}`), live);
+                } catch (e) {
+                    entry.error = e.message;
+                }
+                if (!live()) return;
+                entry.seconds = (performance.now() - started) / 1000;
+                run.steps.push(entry);
+                run.text = `${n + 1} of ${indexes.length} steps searched`;
+                if (exploreAllKey() === run.key) renderResult();
+            }
+            run.status = "done";
+            run.seconds = (performance.now() - run.started) / 1000;
+            renderResult();
+        }, 30);
+    }
+    const exploreReach = (explored) => N64Finder.exploreByDestination(explored).filter((g) => warpsTo(g.destination));
+    // What one exploration found: the summary, the reasons nothing can be reached, and a card for each destination
+    function exploreResults(explored, index, seconds) {
+        const out = [];
+        const reach = exploreReach(explored);
+        const shown = finderTarget ? reach.filter((g) => String(g.destination.id) === finderTarget) : reach;
+        const own = explored.warps.filter((x) => x.context.ownCutscene).length;
+        if (!explored.sources.length) {
+            const places = N64Finder.INDEX_SOURCES.map((s) => `${s.what} (${s.adult ? "adult" : "child"}, ${placeName(s.scene)})`);
+            out.push(el("div", { class: "banner warn" }, `Nothing can leave a cutscene index pending with the route's age and flags as they stand, so no wrong warp starts from here.`),
+                el("details", {}, el("summary", {}, "Where wrong warps can start"), el("ul", { class: "setups" }, places.map((p) => el("li", {}, p)))));
+            return out;
+        }
+        out.push(el("p", { class: "finder-summary" }, `From ${placeName(explored.entrance)} with the pointer at ${addr(explored.pointer)}: `,
+            reach.length ? el("strong", {}, `${plural(reach.length, "destination")} reachable`) : "no destination reachable", ` from ${plural(explored.warps.length, "wrong warp")}.`));
+        out.push(el("div", { class: "hint" }, `${own ? `${plural(own, "warp")} ${own === 1 ? "loads" : "load"} an area that plays its own cutscene, so the pointer is not read. ` : ""}Searched in ${seconds.toFixed(0)} s.`));
+        const outsideHeap = explored.warps.length && explored.warps.every((x) => !x.context.inHeap);
+        if (outsideHeap) {
+            // The first later step whose pointer is inside that step's heap
+            const later = lastRun ? lastRun.results.findIndex((r, i) => i > index && !r.error && r.heap && r.pointer && r.pointer.value >= r.heap.start && r.pointer.value < r.heap.end) : -1;
+            out.push(el("div", { class: "banner warn" }, `The pointer (${addr(explored.pointer)}) is not in the actor heap, so nothing Link leaves can change what these warps parse. `,
+                later >= 0 ? ["Step ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); selected = later; renderSteps(); renderResult(); } }, String(later + 1)),
+                    ` is the first later step with the pointer in the heap (${addr(lastRun.results[later].pointer.value)}): search from there.`]
+                    : "No later step in the route points it into the heap."));
+        } else if (finderTarget && !shown.length) {
+            out.push(el("div", { class: "banner warn" }, "No wrong warp from here reaches that destination."));
+        }
+        // Destinations the route reaches without leaving anything first
+        const free = (g) => g.items.some((item) => !item.leave);
+        const cards = [...shown].sort((x, y) => free(y) - free(x));
+        cards.forEach((g) => {
+            const byWarp = new Map();
+            for (const item of g.items) {
+                const key = `${item.context.travel}|${item.warp.gameOver}|${item.warp.cutsceneIndex}`;
+                if (!byWarp.has(key)) byWarp.set(key, { warp: item.warp, context: item.context, items: [] });
+                byWarp.get(key).items.push(item);
+            }
+            const warps = [...byWarp.values()].map(({ warp, context, items }) => el("div", { class: "warp" },
+                el("div", { class: "warp-title" }, context.travel ? `Go straight to ${placeName(context.travel)}, then ` : "", `${context.travel ? (warp.gameOver ? "die (game over)" : "void out") : warp.gameOver ? "Die (game over)" : "Void out"} during ${warp.source}`,
+                    el("span", { class: "hint" }, ` · index ${warp.cutsceneIndex} · loads ${placeName(context.entrance)}`)),
+                items.some((item) => !item.leave) ? el("ul", { class: "setups" }, el("li", {}, el("strong", {}, "Leave nothing"), ": the pointer already leads here")) : null,
+                items.some((item) => item.leave) ? setupList(items.filter((item) => item.leave).map((item) => item.leave), 10) : null));
+            out.push(destinationCard(outcomeName(g), plural(byWarp.size, "warp"), false, free(g) ? "no setup needed" : null, warps));
+        });
+        return out;
+    }
+    function exploreSection(index) {
+        const run = exploreRuns.get(exploreKey(index));
+        const names = Object.entries(data.csDestinations).sort((a, b) => a[1].localeCompare(b[1]));
+        const target = el("select", {}, el("option", { value: "" }, "Any destination"), ...names.map(([id, name]) => el("option", { value: id }, name)));
+        target.value = finderTarget;
+        target.addEventListener("change", () => { finderTarget = target.value; renderResult(); });
+        const running = run && run.status === "running";
+        const button = el("button", { class: "primary", disabled: !rom || running || (exploreAll && exploreAll.status === "running") ? true : null, onclick: () => startExplore(index) }, run && run.status === "done" ? "Search again" : "Search");
+        const cancel = running ? el("button", { onclick: () => { run.status = "cancelled"; stopWorkers(); renderResult(); } }, "Cancel") : null;
+        const box = el("div", { class: "finder" },
+            el("h3", {}, "Where can this lead from here?"),
+            el("p", { class: "hint" }, "Tries every wrong warp from this point: dying (game over) or voiding out while something here has left a cutscene index pending (a first-time blue warp, Zelda's courtyard talk, Ingo's race and so on). Sources in other areas are tried by going straight there from this step; whether Link can get there (items, songs) is not checked. For each warp it parses the pointer as the route leaves it, and with every actor Link can leave in the heap at every offset and angle."));
+        // Steps where the route's cutscene pointer changes are the ones worth searching from
+        const changes = lastRun ? N64Finder.pointerSteps(lastRun.results) : [];
+        if (changes.length) {
+            box.append(el("div", { class: "hint" }, "The pointer changes at step ",
+                changes.map((i, n) => [n ? ", " : "", el("a", { href: "#", onclick: (e) => { e.preventDefault(); selected = i; renderSteps(); renderResult(); } }, String(i + 1))]),
+                "."));
+        }
+        const allRunning = exploreAll && exploreAll.status === "running";
+        const everyStep = el("button", { disabled: !rom || running || allRunning ? true : null, title: "Search from every step of the route in turn, and list each result", onclick: () => startExploreAll() }, "Search every step");
+        box.append(el("div", { class: "row" }, searchable(target), button, everyStep, cancel));
+        if (!rom) box.append(el("div", { class: "hint" }, "Load your ROM to search: the parser reads scene and object data from it."));
+        if (running) box.append(el("div", { id: "exploreStatus", class: "hint" }, run.text || "Running the route"));
+        if (run && run.status === "error") box.append(el("div", { class: "banner bad" }, run.error));
+        if (run && run.status === "cancelled") box.append(el("div", { class: "hint" }, "Search cancelled."));
+        if (run && run.status === "done") box.append(el("div", { class: "finder-results" }, exploreResults(run.explored, index, run.seconds)));
+        // Every step at once, one accordion entry each
+        const all = exploreAll && exploreAll.key === exploreAllKey() ? exploreAll : null;
+        if (all) {
+            const allRunning = all.status === "running";
+            box.append(el("h3", {}, "Every step"));
+            if (allRunning) box.append(el("div", { class: "row" }, el("span", { id: "exploreAllStatus", class: "hint" }, all.text || "Starting"),
+                el("button", { onclick: () => { all.status = "cancelled"; stopWorkers(); renderResult(); } }, "Cancel")));
+            if (all.status === "cancelled") box.append(el("div", { class: "hint" }, `Cancelled after ${plural(all.steps.length, "step")}.`));
+            if (all.status === "done") box.append(el("div", { class: "hint" }, `${plural(all.steps.length, "step")} searched in ${all.seconds.toFixed(0)} s.`));
+            const list = el("div", { class: "finder-results" });
+            for (const entry of all.steps) {
+                const reach = entry.explored ? exploreReach(entry.explored) : [];
+                const shownReach = finderTarget ? reach.filter((g) => String(g.destination.id) === finderTarget) : reach;
+                const ex = entry.explored;
+                const count = entry.error ? "error" : !ex.sources.length ? "no wrong warp" : ex.warps.length && ex.warps.every((x) => !x.context.inHeap) ? `pointer ${addr(ex.pointer)} outside the heap` : `pointer ${addr(ex.pointer)}`;
+                // Entries stay open, and the list keeps its place, while later steps are added
+                const card = destinationCard(`Step ${entry.index + 1}: ${stepText(state.steps[entry.index])}`, count, all.open.has(entry.index),
+                    shownReach.length ? plural(shownReach.length, "destination") : null,
+                    entry.error ? el("div", { class: "banner bad" }, entry.error) : exploreResults(ex, entry.index, entry.seconds));
+                card.addEventListener("toggle", () => (card.open ? all.open.add(entry.index) : all.open.delete(entry.index)));
+                list.append(card);
+            }
+            list.addEventListener("scroll", () => { all.scroll = list.scrollTop; });
+            box.append(list);
+            requestAnimationFrame(() => { list.scrollTop = all.scroll; });
+        }
+        return box;
     }
 
     const COLORS = [["free", "--free"], ["actor", "--actor"], ["code", "--code"], ["Link", "--player"], ["effect code", "--effect"], ["other", "--other"], ["pointer", "--pointer"]];

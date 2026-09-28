@@ -5,7 +5,7 @@ const vm = require("vm");
 
 const dir = path.join(__dirname, "..");
 globalThis.window = globalThis;
-for (const file of ["data.js", "engine.js", "rules.js", "route.js", "rom.js"]) {
+for (const file of ["data.js", "engine.js", "rules.js", "route.js", "rom.js", "finder.js", "planner.js"]) {
     const full = path.join(dir, file);
     if (fs.existsSync(full)) vm.runInThisContext(fs.readFileSync(full, "utf8"), { filename: full });
 }

@@ -114,6 +114,24 @@ td.mono, .mono { font-family: var(--mono); }
 #flagSections .flag.number > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 #flagSections .flag.number > .horse { display: flex; flex-direction: column; gap: 4px; flex: none; }
 #flagSections .flag.number > input { flex: none; width: 72px; text-align: right; font-family: var(--mono); }
+.finder { border: 1px solid var(--line); border-radius: 7px; padding: 4px 12px 10px; margin: 10px 0; }
+.finder .combo { flex: 1; }
+.finder .finder-summary { margin: 10px 0 2px; font-size: 14px; }
+.finder .finder-results { max-height: 60vh; overflow-y: auto; padding-right: 4px; }
+.finder .planner-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 10px; align-items: center; margin: 8px 0; font-size: 13px; }
+.finder .planner-kinds { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 6px 0; font-size: 13px; }
+.finder .planner-kinds label { display: flex; align-items: center; gap: 4px; }
+.finder details.dest { border: 1px solid var(--line); border-radius: 6px; padding: 0; margin: 8px 0; }
+.finder details.dest > summary { display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; background: var(--free); border-radius: 6px; }
+.finder details.dest[open] > summary { border-radius: 6px 6px 0 0; }
+.finder details.dest > summary .count { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 12px; }
+.finder .badge { font-size: 11px; font-weight: 600; color: var(--good); border: 1px solid var(--good); border-radius: 10px; padding: 0 6px; }
+.finder .dest-body { padding: 2px 10px 6px; }
+.finder .warp { padding: 6px 0; }
+.finder .warp + .warp { border-top: 1px solid var(--line); }
+.finder .warp-title { font-weight: 600; font-size: 13px; }
+.finder ul.setups { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+.finder ul.setups li { margin: 4px 0; }
 textarea { width: 100%; min-height: 90px; font: 12px var(--mono); background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
 </style>
 </head>
@@ -185,6 +203,8 @@ textarea { width: 100%; min-height: 90px; font: 12px var(--mono); background: va
 <script src="rules.js"></script>
 <script src="route.js"></script>
 <script src="rom.js"></script>
+<script src="finder.js"></script>
+<script src="planner.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

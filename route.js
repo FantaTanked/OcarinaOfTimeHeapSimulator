@@ -196,6 +196,7 @@
         }
         if (csIndex >= CS_INDEX_0) {
             // Cutscene_UpdateScripted runs after the first Actor_UpdateAll and parses whatever the pointer holds
+            if (w.onCutsceneParse) w.onCutsceneParse(w);
             report.cutscene = w.simulateCutscene();
             report.stale = !(offset !== null && offset !== undefined && layer === loadedLayer);
         }
@@ -392,9 +393,10 @@
     }
 
     // Runs a whole route and snapshots the game after every step
-    function runRoute(data, rules, flagInput, steps, rom) {
+    function runRoute(data, rules, flagInput, steps, rom, hooks) {
         Sim.prepare(data);
         const w = new Sim.World(data, rules, makeFlags(flagInput), rom);
+        if (hooks) Object.assign(w, hooks);
         const results = [];
         for (const step of steps) {
             const def = STEPS[step.type] || (rules.STEPS && rules.STEPS[step.type]);
@@ -424,6 +426,8 @@
                 scene: w.sceneData ? w.sceneData.enum : null,
                 room: w.curRoom,
                 heap: w.arena ? snapshotHeap(w) : null,
+                link: w.linkPos ? { pos: w.linkPos.slice(), angle: w.linkAngle || 0 } : null,
+                entrance: w.entranceBase || null,
                 pointer: { value: w.cs.value, source: w.cs.source, at: w.cs.value ? w.describe(w.cs.value) : "" },
             });
             if (error) break;

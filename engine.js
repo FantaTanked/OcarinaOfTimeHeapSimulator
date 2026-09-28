@@ -813,13 +813,21 @@
     }
 
     // Cutscene_ProcessScript's walk (z_demo.c); the same bytes are parsed every frame, so the first frame decides the outcome
-    function simulateCutscene(data, address, read) {
-        const handled = new Set(data.meta.cutsceneCommands);
-        const steps = [];
-        const cues = [];
+    // read(address, purpose) says what the word is for: header, command, count (of an unknown command) or data
+    // quiet skips the step log and cues, for searches that parse many times and only need the outcome; with a memo, the
+    // rest of a parse from the first command at or past memoFrom is reused (the parser only reads forward)
+    function simulateCutscene(data, address, read, quiet, memo, memoFrom) {
+        let memoKey = null;
+        const finish = (result) => {
+            if (memoKey !== null) memo.set(memoKey, { outcome: result.outcome, destination: result.destination, detail: result.detail });
+            return result;
+        };
+        const handled = data.handledCommands || (data.handledCommands = new Set(data.meta.cutsceneCommands));
+        const steps = quiet ? { push() {} } : [];
+        const cues = quiet ? { push() {} } : [];
         const result = { address, outcome: "unknown", header: null, steps, destination: null, detail: "", cues };
-        const first = read(address);
-        const second = read(address + 4);
+        const first = read(address, "header");
+        const second = read(address + 4, "header");
         result.source = first.source;
         if (first.value === null || second.value === null) {
             result.detail = `reads ${addr(first.value === null ? address : address + 4)}: ${first.value === null ? first.source : second.source}`;
@@ -841,14 +849,22 @@
         let commands = 0;
         let i = 0;
         const word = (at) => {
-            const w = read(at);
+            const w = read(at, "data");
             if (w.value === null) throw { unmodelled: w.source, at };
             return w.value;
         };
         try {
             for (; i < limit; i++) {
+                if (memo && memoKey === null && script >= memoFrom) {
+                    memoKey = `${script}:${i}:${commands ? 1 : 0}:${result.destination ? result.destination.id : -1}`;
+                    const tail = memo.get(memoKey);
+                    if (tail) {
+                        memoKey = null;
+                        return Object.assign(result, tail);
+                    }
+                }
                 const at = script;
-                const w = read(script);
+                const w = read(script, "command");
                 if (w.value === null) throw { unmodelled: w.source, at };
                 const command = w.value | 0;
                 script += 4;
@@ -857,12 +873,12 @@
                     break;
                 }
                 const channel = data.csCueChannels[String(command)];
-                if (channel !== undefined) {
+                if (channel !== undefined && !quiet) {
                     // CsCmdActorCue (cutscene.h): id, startFrame, endFrame, rot, startPos, endPos in 0x30 bytes
                     const count = Math.max(0, word(script) | 0);
                     for (let j = 0; j < count; j++) {
                         const words = [];
-                        for (let k = 0; k < 12; k++) words.push(read(script + 4 + j * 0x30 + k * 4).value);
+                        for (let k = 0; k < 12; k++) words.push(read(script + 4 + j * 0x30 + k * 4, "data").value);
                         if (words.some((v) => v === null)) {
                             cues.push({ channel, command, unknown: true });
                             continue;
@@ -893,7 +909,7 @@
                     commands++;
                     continue;
                 }
-                const countWord = read(script);
+                const countWord = read(script, "count");
                 if (countWord.value === null) throw { unmodelled: countWord.source, at: script };
                 const count = countWord.value | 0;
                 script += 4;
@@ -901,7 +917,7 @@
                     steps.push({ at, text: `unknown command ${hex(command)} with ${hex(count)} entries`, source: w.source });
                     result.outcome = "hang";
                     result.detail = `unknown command ${hex(command)} has ${hex(count)} entries; the s16 counter never reaches it`;
-                    return result;
+                    return finish(result);
                 }
                 const skip = Math.max(count, 0) * 0x30;
                 steps.push({ at, text: `unknown command ${hex(command)}: skip ${hex(Math.max(count, 0))} x 0x30 to ${addr(script + skip)}`, source: w.source });
@@ -911,18 +927,18 @@
             if (error && error.unmodelled !== undefined) {
                 result.outcome = "unknown";
                 result.detail = `reads ${addr(error.at)}: ${error.unmodelled}`;
-                return result;
+                return finish(result);
             }
             throw error;
         }
         if (i === MAX_COMMANDS) {
             result.outcome = "hang";
             result.detail = "the command loop never reaches its entry count";
-            return result;
+            return finish(result);
         }
         result.outcome = commands ? "runs" : "empty";
         result.detail = commands ? `${commands} commands` : "no commands the game acts on";
-        return result;
+        return finish(result);
     }
 
     // Bytes a handled command's data occupies, following CopyCommand in N64ObjectSpace.cpp
@@ -964,5 +980,5 @@
         return data;
     }
 
-    root.N64Sim = { Arena, Memory, ObjectSpace, World, simulateCutscene, prepare, hex, addr, SimError, CAT_ENEMY };
+    root.N64Sim = { Arena, Memory, ObjectSpace, World, simulateCutscene, actorImage, prepare, hex, addr, SimError, CAT_ENEMY };
 })(typeof window !== "undefined" ? window : globalThis);

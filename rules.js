@@ -2725,6 +2725,19 @@
         if (epona) return horse(HORSE_GAMEPLAY_SPAWNS[scene], 0, 2, "Epona (waiting for her song)");
     }
 
+    // z_kaleido_scope.c:4572-4650 Continue after a game over reloads the last entrance, but a boss room gives its dungeon's
+    // entrance and the Ganon collapse gives the collapse exit
+    const GAME_OVER_BOSS_ENTRANCES = {
+        ENTR_DEKU_TREE_BOSS_0: "ENTR_DEKU_TREE_0", ENTR_DODONGOS_CAVERN_BOSS_0: "ENTR_DODONGOS_CAVERN_0", ENTR_JABU_JABU_BOSS_0: "ENTR_JABU_JABU_0",
+        ENTR_FOREST_TEMPLE_BOSS_0: "ENTR_FOREST_TEMPLE_0", ENTR_FIRE_TEMPLE_BOSS_0: "ENTR_FIRE_TEMPLE_0", ENTR_WATER_TEMPLE_BOSS_0: "ENTR_WATER_TEMPLE_0",
+        ENTR_SPIRIT_TEMPLE_BOSS_0: "ENTR_SPIRIT_TEMPLE_0", ENTR_SHADOW_TEMPLE_BOSS_0: "ENTR_SHADOW_TEMPLE_0", ENTR_GANONDORF_BOSS_0: "ENTR_GANONS_TOWER_0",
+    };
+    const COLLAPSE_SCENES = ["SCENE_GANONS_TOWER_COLLAPSE_INTERIOR", "SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR", "SCENE_INSIDE_GANONS_CASTLE_COLLAPSE", "SCENE_GANON_BOSS"];
+    function gameOverEntrance(base, sceneEnum) {
+        if (COLLAPSE_SCENES.includes(sceneEnum)) return "ENTR_GANONS_TOWER_COLLAPSE_EXTERIOR_0";
+        return GAME_OVER_BOSS_ENTRANCES[base] || base;
+    }
+
     // z_skin_awb.c Skin_Init: the limb table, both vertex buffers of the animated limb, then SkelAnime_InitSkin's two tables
     function skinAllocs(w, a, name, limbs, vertices) {
         w.allocateFor(a, limbs * 0xc, `${name} skin vtxTable`, false);
@@ -4428,14 +4441,7 @@
             help: "z_kaleido_scope.c:4572-4650 and z_play.c:1936-1962: Continue reloads the last entrance (boss rooms give the dungeon entrance) with respawnFlag -2 and the temp flags; for a pending cutscene index use Wrong warp.",
             params: [],
             run(w) {
-                const BOSS = {
-                    ENTR_DEKU_TREE_BOSS_0: "ENTR_DEKU_TREE_0", ENTR_DODONGOS_CAVERN_BOSS_0: "ENTR_DODONGOS_CAVERN_0", ENTR_JABU_JABU_BOSS_0: "ENTR_JABU_JABU_0",
-                    ENTR_FOREST_TEMPLE_BOSS_0: "ENTR_FOREST_TEMPLE_0", ENTR_FIRE_TEMPLE_BOSS_0: "ENTR_FIRE_TEMPLE_0", ENTR_WATER_TEMPLE_BOSS_0: "ENTR_WATER_TEMPLE_0",
-                    ENTR_SPIRIT_TEMPLE_BOSS_0: "ENTR_SPIRIT_TEMPLE_0", ENTR_SHADOW_TEMPLE_BOSS_0: "ENTR_SHADOW_TEMPLE_0", ENTR_GANONDORF_BOSS_0: "ENTR_GANONS_TOWER_0",
-                };
-                const base = N64Route.STEPS.voidOut.baseEntrance(w);
-                const collapse = ["SCENE_GANONS_TOWER_COLLAPSE_INTERIOR", "SCENE_GANONS_TOWER_COLLAPSE_EXTERIOR", "SCENE_INSIDE_GANONS_CASTLE_COLLAPSE", "SCENE_GANON_BOSS"];
-                const entrance = collapse.includes(w.sceneData.enum) ? "ENTR_GANONS_TOWER_COLLAPSE_EXTERIOR_0" : BOSS[base] || base;
+                const entrance = gameOverEntrance(N64Route.STEPS.voidOut.baseEntrance(w), w.sceneData.enum);
                 // Play_TriggerRespawn stores this scene's temp flags in respawn DOWN (skipped in grottos and fairy fountains)
                 const inGrotto = ["SCENE_GROTTOS", "SCENE_FAIRYS_FOUNTAIN"].includes(w.sceneData.enum);
                 w.objectSpace.gameOverOpened(w.flags.japanese);
@@ -6029,6 +6035,7 @@
         STEPS,
         INIT,
         CUES,
+        gameOverEntrance,
         ACTIONS,
         ACTION_LABELS,
         FLAGS,

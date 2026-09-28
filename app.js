@@ -337,6 +337,9 @@
         const open = (query) => {
             const words = query.toLowerCase().split(/\s+/).filter(Boolean);
             shown = [...select.options].filter((o) => o.value !== "" && words.every((w) => `${o.text} ${o.value}`.toLowerCase().includes(w)));
+            // The blank option ("Any destination" and the like) heads the list until something is typed
+            const blank = [...select.options].find((o) => o.value === "");
+            if (blank && !words.length) shown.unshift(blank);
             list.replaceChildren(...shown.slice(0, 400).map((o) => el("div", { class: `combo-row${o.value === select.value ? " current" : ""}`, onmousedown: (e) => { e.preventDefault(); pick(o); } }, o.text)));
             if (!shown.length) list.append(el("div", { class: "combo-empty" }, "No match"));
             const box = input.getBoundingClientRect();
@@ -351,7 +354,16 @@
         };
         input.addEventListener("focus", () => { input.select(); open(""); });
         input.addEventListener("input", () => { open(input.value); if (shown.length) highlight(0); });
-        input.addEventListener("blur", () => { close(); sync(); });
+        input.addEventListener("blur", () => {
+            // Emptying the box picks the blank option, where there is one
+            const blank = [...select.options].find((o) => o.value === "");
+            if (blank && input.value.trim() === "" && select.value !== "") {
+                select.value = "";
+                select.dispatchEvent(new Event("change"));
+            }
+            close();
+            sync();
+        });
         input.addEventListener("keydown", (e) => {
             if (e.key === "ArrowDown") { e.preventDefault(); if (!list.isConnected) open(""); highlight(active + 1); }
             else if (e.key === "ArrowUp") { e.preventDefault(); highlight(active - 1); }
